@@ -1208,6 +1208,7 @@ export namespace Replay {
           kills: [number, number];
           brought: boolean;
           fainted: boolean;
+          moveset: string[];
           damageDealt: [number, number];
           damageTaken: [number, number];
           hpRestored: number;
@@ -1233,6 +1234,7 @@ export namespace Replay {
             kills: pokemon.kills,
             brought: pokemon.brought,
             fainted: pokemon.fainted,
+            moveset: pokemon.moveset,
             damageDealt: [
               Math.round(pokemon.damageDealt[0] * 10) / 10,
               Math.round(pokemon.damageDealt[1] * 10) / 10,
