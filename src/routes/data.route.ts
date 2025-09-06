@@ -10,7 +10,7 @@ import {
 } from "../data/rulesets";
 import { getRandom } from "../services/data-services/pokedex.service";
 import { searchPokemon } from "../services/search.service";
-import { getApprovedLeagues } from "../services/league-ad/league-ad-service";
+// import { getApprovedLeagues } from "../services/league-ad/league-ad-service";
 import { parseTime } from "../util";
 import { getNews } from "../services/news/news-service";
 
@@ -83,7 +83,7 @@ export const DataRoutes: Route = {
           }
         } catch (error) {
           console.error(
-            `Error in /search route:", ${
+            `Error in /search route: ${
               (error as Error).message
             }\nSearch query: ${req.query.query}`
           );
@@ -113,7 +113,7 @@ export const DataRoutes: Route = {
             .json({ error: "Query type error", code: "DT-R3-01" });
         } catch (error) {
           console.error(
-            `Error in /listpokemon route:", ${
+            `Error in /listpokemon route: ${
               (error as Error).message
             }\nSearch query: ${req.query.query}`
           );
@@ -123,49 +123,49 @@ export const DataRoutes: Route = {
         }
       },
     },
-    "/unread-counts": {
-      get: async (req: Request, res: Response) => {
-        try {
-          const timeEntries = Object.entries(req.query) as [
-            string,
-            string | number
-          ][];
+    // "/unread-counts": {
+    //   get: async (req: Request, res: Response) => {
+    //     try {
+    //       const timeEntries = Object.entries(req.query) as [
+    //         string,
+    //         string | number
+    //       ][];
 
-          const results = await Promise.all(
-            timeEntries.map(
-              async ([type, timeString]): Promise<[string, number]> => {
-                const time = parseTime(timeString);
-                if (!time) return [type, -1];
-                switch (type) {
-                  case "leagueAd":
-                    const leagues = await getApprovedLeagues();
-                    return [
-                      type,
-                      leagues.filter((l) => l.createdAt > time).length,
-                    ];
-                  case "news":
-                    const news = await getNews();
-                    return [
-                      type,
-                      news.filter((n) => n.createdAt > time).length,
-                    ];
-                  default:
-                    return [type, -1];
-                }
-              }
-            )
-          );
+    //       const results = await Promise.all(
+    //         timeEntries.map(
+    //           async ([type, timeString]): Promise<[string, number]> => {
+    //             const time = parseTime(timeString);
+    //             if (!time) return [type, -1];
+    //             switch (type) {
+    //               case "leagueAd":
+    //                 const leagues = await getApprovedLeagues();
+    //                 return [
+    //                   type,
+    //                   leagues.filter((l) => l.createdAt > time).length,
+    //                 ];
+    //               case "news":
+    //                 const news = await getNews();
+    //                 return [
+    //                   type,
+    //                   news.filter((n) => n.createdAt > time).length,
+    //                 ];
+    //               default:
+    //                 return [type, -1];
+    //             }
+    //           }
+    //         )
+    //       );
 
-          const counts = Object.fromEntries(results);
-          res.json(counts);
-        } catch (error) {
-          console.error(error);
-          res
-            .status(500)
-            .json({ message: (error as Error).message, code: "DT-R4-01" });
-        }
-      },
-    },
+    //       const counts = Object.fromEntries(results);
+    //       res.json(counts);
+    //     } catch (error) {
+    //       console.error(error);
+    //       res
+    //         .status(500)
+    //         .json({ message: (error as Error).message, code: "DT-R4-01" });
+    //     }
+    //   },
+    // },
     "/random": {
       get: async (req: Request, res: DataResponse) => {
         try {
@@ -208,7 +208,7 @@ export const DataRoutes: Route = {
             .json({ error: "Query type error", code: "DT-R3-01" });
         } catch (error) {
           console.error(
-            `Error in /random route:", ${
+            `Error in /random route: ${
               (error as Error).message
             }\nRandom query: ${req.query.query}`
           );
@@ -238,7 +238,7 @@ export const DataRoutes: Route = {
             .filter((forme) => forme !== null && forme.id !== pokemonData.id);
           return res.json(formes);
         } catch (error) {
-          console.error(`Error in forme route:", ${(error as Error).message}`);
+          console.error(`Error in forme route: ${(error as Error).message}`);
           res
             .status(500)
             .json({ error: "Internal Server Error", code: "DT-R4-02" });
@@ -257,8 +257,8 @@ export const DataRoutes: Route = {
       );
       if (!res.locals.pokemonData) {
         return res
-          .status(400)
-          .json({ error: "Pokemon not found error", code: "DT-R4-01" });
+          .status(404)
+          .json({ error: "Pokémon not found.", code: "DT-R4-01" });
       }
       next();
     },

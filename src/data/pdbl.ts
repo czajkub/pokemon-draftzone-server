@@ -104,21 +104,13 @@ namespace TierList {
       };
     }
 
-    toDetails(): ({
-      name: string;
-      banned?: {
-        moves?: string[];
-        abilities?: string[];
-        tera?: true;
-      };
-      drafted?: string[];
-    } & ({ tier: number } | { ref: string }))[] {
+    toDetails(): TierDetail[] {
       return [
         {
           name: this.specie.id,
           banned: this.banned,
           drafted: this.drafted.length > 0 ? this.drafted : undefined,
-          tier: this.tier?.index,
+          tier: this.tier?.name,
         },
         ...(this.subPokemon
           ? this.subPokemon?.map((sub) => ({
@@ -137,6 +129,16 @@ namespace TierList {
   }
 }
 
+type TierDetail = {
+  name: string;
+  banned?: {
+    moves?: string[];
+    abilities?: string[];
+    tera?: true;
+  };
+  drafted?: string[];
+} & ({ tier: string } | { ref: string });
+
 type DraftDetails = {
   tierGroups: { tiers: string[]; label?: string }[];
   banned: {
@@ -144,27 +146,29 @@ type DraftDetails = {
     abilities: string[];
   };
   divisions: string[];
-  tiers: ({
-    name: string;
-    banned?: {
-      moves?: string[];
-      abilities?: string[];
-      tera?: true;
-    };
-    drafted?: string[];
-  } & ({ tier: number } | { ref: string }))[];
+  tiers: TierDetail[];
 };
 
 function getDetailsFromJson(): DraftDetails {
   return JSON.parse(fs.readFileSync(path, "utf8"));
 }
 
+let cachedDetails: {
+  tiers: TierList.Tier[];
+  pokemons: TierList.Pokemon[];
+  tierGroups: TierList.TierGroup[];
+} | null = null;
+
 export function getDetails(details?: DraftDetails) {
+  if (cachedDetails && !details) {
+    return { ...cachedDetails };
+  }
+
   const tiers: TierList.Tier[] = [];
 
-  if (!details) details = getDetailsFromJson();
+  const sourceDetails = details || getDetailsFromJson();
 
-  const tierGroups = details.tierGroups.map((groupDetails) => {
+  const tierGroups = sourceDetails.tierGroups.map((groupDetails) => {
     const tierGroup = new TierList.TierGroup(groupDetails.label);
     groupDetails.tiers.forEach((tierName) => {
       const tier = new TierList.Tier(tierName, tiers.length);
@@ -186,13 +190,13 @@ export function getDetails(details?: DraftDetails) {
     ref: string;
   }[] = [];
 
-  details.tiers.forEach((pokemon) => {
-    const specie = getRuleset("Gen9 NatDex").species.get(pokemon.name);
+  sourceDetails.tiers.forEach((pokemon) => {
+    const specie = getRuleset("Gen9 NatDex").species.get(pokemon.name)!;
     if (!specie) throw new Error(`${pokemon.name} does not exist`);
 
     Object.values(specie.abilities).forEach((abilityName) => {
       if (
-        details.banned.abilities.includes(abilityName) &&
+        sourceDetails.banned.abilities.includes(abilityName) &&
         !pokemon.banned?.abilities?.includes(abilityName)
       ) {
         if (!pokemon.banned) pokemon.banned = {};
@@ -202,7 +206,7 @@ export function getDetails(details?: DraftDetails) {
     });
 
     if ("tier" in pokemon) {
-      const tier = tiers.find((tier) => tier.index === pokemon.tier);
+      const tier = tiers.find((tier) => tier.name === pokemon.tier);
       if (!tier)
         throw new Error(`${pokemon.tier} outside range for ${pokemon.name}`);
       const tierPokemon = new TierList.Pokemon(
@@ -218,7 +222,13 @@ export function getDetails(details?: DraftDetails) {
     }
   });
 
-  return { tiers, pokemons, tierGroups };
+  const processedDetails = { tiers, pokemons, tierGroups };
+
+  if (!details) {
+    cachedDetails = processedDetails;
+  }
+
+  return { ...processedDetails };
 }
 
 export function getTiers() {
@@ -256,5 +266,6 @@ export function setDrafted(
   }
   details.tiers = list.flatMap((mon) => mon.toDetails());
   writeDetails(details);
+  cachedDetails = null;
   return foundMon.specie.name;
 }
