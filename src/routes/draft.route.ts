@@ -1,22 +1,30 @@
 import { Request, Response } from "express";
-import mongoose, { Types } from "mongoose";
-import { jwtCheck, Route, sendError } from ".";
-import { ArchiveOld } from "../classes/archive";
+import { startSession } from "mongoose";
+import { Route, sendError } from ".";
+import { logger } from "../app";
+import { Archive } from "../classes/archive";
 import { Draft } from "../classes/draft";
 import { GameTime, Matchup, Score } from "../classes/matchup";
 import { Opponent } from "../classes/opponent";
 import { getRuleset, Ruleset } from "../data/rulesets";
-import { DraftData, DraftDocument, DraftModel } from "../models/draft.model";
+import { jwtCheck } from "../middleware/jwtcheck";
+import { DraftData, DraftDocument } from "../models/draft/draft.model";
+import { MatchupData, MatchupDocument } from "../models/draft/matchup.model";
 import {
-  MatchupData,
-  MatchupDocument,
-  MatchupModel,
-} from "../models/matchup.model";
-import {
-  getScore,
+  createDraft,
+  deleteDraft,
+  getDraft,
+  getDraftsByOwner,
   getStats,
-} from "../services/database-services/draft.services";
-import { $matchups } from "./matchup.route";
+  updateDraft,
+} from "../services/database-services/draft.service";
+import {
+  clearMatchupCacheById,
+  createMatchup,
+  getMatchupById,
+  getMatchupsByDraftId,
+  updateMatchup,
+} from "../services/database-services/matchup.service";
 
 type MatchupResponse = DraftResponse & {
   matchup?: Matchup;
@@ -25,9 +33,6 @@ type MatchupResponse = DraftResponse & {
 
 type DraftResponse = Response & {
   rawDraft?: DraftDocument | null;
-  draftOld?: DraftData & {
-    _id: Types.ObjectId;
-  };
   draft?: Draft;
   ruleset?: Ruleset;
 };
@@ -40,12 +45,7 @@ export const DraftRoutes: Route = {
     "/teams": {
       get: async function (req: Request, res: DraftResponse) {
         try {
-          const drafts = await DraftModel.find({
-            owner: req.auth!.payload.sub!,
-          }).sort({
-            createdAt: -1,
-          });
-
+          const drafts = await getDraftsByOwner(req.auth!.payload.sub!);
           res.json(
             await Promise.all(
               drafts.map(
@@ -63,63 +63,58 @@ export const DraftRoutes: Route = {
         }
         try {
           const draft = Draft.fromForm(req.body, req.auth!.payload.sub!);
-          const draftDoc = new DraftModel(draft.toData());
-          const foundDrafts = await DraftModel.find({
-            owner: req.auth!.payload.sub!,
-            leagueId: draftDoc.leagueId,
-          });
-          if (foundDrafts.length > 0)
-            return res
-              .status(409)
-              .json({
-                message: "A draft with this league name already exists.",
-                code: "DR-R1-02",
-              });
-          await draftDoc.save();
+          await createDraft(draft.toData());
           return res.status(201).json({ message: "Draft Added" });
-        } catch (error) {
+        } catch (error: any) {
+          if (error.code === 11000) {
+            logger.error("Duplicate draft name:", error);
+            return res.status(409).json({
+              message: "A draft with this league name already exists.",
+              code: `${routeCode}-R1-02`,
+            });
+          }
           return sendError(res, 500, error as Error, `${routeCode}-R1-03`);
         }
       },
     },
     "/:team_id": {
       get: async function (req: Request, res: DraftResponse) {
-        if (!res.draftOld) {
+        if (!res.draft) {
           return;
         }
         try {
-          res.draftOld.score = await getScore(res.draftOld._id);
+          res.draft.score = await res.draft.getScore();
           res.json(await res.draft!.toClient());
         } catch (error) {
           return sendError(res, 500, error as Error, `${routeCode}-R2-03`);
         }
       },
-      patch: async function (req: Request, res: DraftResponse) {
+      patch: async function (req: Request, res: MatchupResponse) {
         if (!req.auth!.payload.sub!) return;
         try {
           const draft = Draft.fromForm(
             req.body,
             req.auth!.payload.sub!
           ).toData();
-          const updatedDraft = await DraftModel.findOneAndUpdate(
-            { owner: req.auth!.payload.sub!, leagueId: req.params.team_id },
-            draft,
-            { new: true, upsert: true }
+          const updatedDraft = await updateDraft(
+            req.auth!.payload.sub!,
+            req.params.team_id,
+            draft
           );
           if (updatedDraft) {
-            $matchups
-              .keys()
-              .filter((key: string) =>
-                key.startsWith(updatedDraft._id.toString())
-              )
-              .forEach((key: any) => $matchups.del(key));
+            const matchups = await getMatchupsByDraftId(updatedDraft._id);
+            matchups.forEach((matchup) =>
+              clearMatchupCacheById(matchup._id.toString())
+            );
             return res
               .status(200)
               .json({ message: "Draft Updated", draft: updatedDraft });
+          } else {
+            logger.error(`Draft not found for team_id: ${req.params.team_id}`);
+            return res
+              .status(404)
+              .json({ message: "Draft not found", code: `${routeCode}-R2-02` });
           }
-          return res
-            .status(404)
-            .json({ message: "Draft not found", code: "DR-R2-02" });
         } catch (error) {
           return sendError(res, 500, error as Error, `${routeCode}-R2-03`);
         }
@@ -129,8 +124,8 @@ export const DraftRoutes: Route = {
           return;
         }
         try {
-          await res.rawDraft.deleteOne();
-          res.status(201).json({ message: "Draft deleted" });
+          await deleteDraft(res.rawDraft);
+          return res.status(201).json({ message: "Draft deleted" });
         } catch (error) {
           return sendError(res, 500, error as Error, `${routeCode}-R2-04`);
         }
@@ -150,17 +145,18 @@ export const DraftRoutes: Route = {
             )
           );
         } catch (error) {
-          console.log(this);
           return sendError(res, 500, error as Error, `${routeCode}-R3-01`);
         }
       },
       post: async function (req: Request, res: DraftResponse) {
+        if (!req.auth!.payload.sub!) {
+          return;
+        }
         try {
           const opponent = Opponent.fromForm(req.body, res.ruleset!);
           const matchup = Matchup.fromForm(res.draft!, opponent);
-          const doc: MatchupDocument = new MatchupModel(matchup.toData());
-          const response = await doc.save();
-          res.status(201).json({ message: "Matchup Added" });
+          await createMatchup(matchup.toData());
+          return res.status(201).json({ message: "Matchup Added" });
         } catch (error) {
           return sendError(res, 500, error as Error, `${routeCode}-R3-02`);
         }
@@ -168,77 +164,71 @@ export const DraftRoutes: Route = {
     },
     "/:team_id/stats": {
       get: async function (req: Request, res: DraftResponse) {
-        if (!res.draftOld || !res.ruleset) {
-          return;
-        }
         try {
-          res.json(await getStats(res.ruleset, res.draftOld._id));
+          res.json(await getStats(res.ruleset!, res.draft!._id!));
         } catch (error) {
-          res.status(500).json({ message: (error as Error).message });
           return sendError(res, 500, error as Error, `${routeCode}-R4-01`);
         }
       },
     },
     "/:team_id/archive": {
       delete: async function (req: Request, res: DraftResponse) {
-        if (!res.draftOld || !res.rawDraft) {
-          return;
-        }
+        if (!res.rawDraft) return;
+        const session = await startSession();
+        session.startTransaction();
         try {
-          const archive = new ArchiveOld(res.draftOld);
+          const archive = new Archive(res.rawDraft.toObject<DraftData>());
           const archiveData = await archive.createArchive();
-          await res.rawDraft.deleteOne();
-          archiveData.save();
+          await deleteDraft(res.rawDraft);
+          archiveData.save({ session });
+          await session.commitTransaction();
           res.status(201).json({ message: "Archive added" });
         } catch (error) {
-          console.error("Error handling archive:", error);
-          res
-            .status(500)
-            .json({ message: (error as Error).message, code: "DR-R5-01" });
+          await session.abortTransaction();
+          return sendError(res, 500, error as Error, `${routeCode}-R5-01`);
+        } finally {
+          session.endSession();
         }
       },
     },
     "/:team_id/:matchup_id": {
       get: async function (req: Request, res: MatchupResponse) {
         try {
-          res.json(res.matchup!.toClient());
+          return res.json(res.matchup!.toClient());
         } catch (error) {
-          res
-            .status(500)
-            .json({ message: (error as Error).message, code: "DR-R6-01" });
+          return sendError(res, 500, error as Error, `${routeCode}-R6-01`);
         }
       },
     },
     "/:team_id/:matchup_id/opponent": {
       get: async function (req: Request, res: MatchupResponse) {
         try {
-          console.log(res.matchup);
           const opponent = res.matchup!.toOpponent();
-          res.json(opponent.toClient());
+          return res.json(opponent.toClient());
         } catch (error) {
-          res
-            .status(500)
-            .json({ message: (error as Error).message, code: "DR-R7-01" });
+          return sendError(res, 500, error as Error, `${routeCode}-R7-01`);
         }
       },
       patch: async function (req: Request, res: MatchupResponse) {
-        if (!res.draftOld) return;
         try {
           const opponent = Opponent.fromForm(req.body, res.ruleset!);
-          const updatedMatchup = await MatchupModel.findByIdAndUpdate(
+          const updatedMatchup = await updateMatchup(
             req.params.matchup_id,
-            opponent.toData(),
-            { new: true, upsert: true }
+            opponent.toData()
           );
-          $matchups.del(`${res.draftOld._id}-${req.params.matchup_id}`);
+          clearMatchupCacheById(req.params.matchup_id);
           if (updatedMatchup) {
-            res
+            return res
               .status(200)
               .json({ message: "Matchup Updated", draft: updatedMatchup });
           } else {
-            res
-              .status(404)
-              .json({ message: "Matchup not found", code: "DR-R7-02" });
+            logger.error(
+              `Matchup not found for matchup_id: ${req.params.matchup_id}`
+            );
+            return res.status(404).json({
+              message: "Matchup not found",
+              code: `${routeCode}-R7-02`,
+            });
           }
         } catch (error) {
           return sendError(res, 500, error as Error, `${routeCode}-R7-03`);
@@ -248,83 +238,70 @@ export const DraftRoutes: Route = {
     "/:team_id/:matchup_id/score": {
       patch: async function (req: Request, res: DraftResponse) {
         try {
-          console.log(req.body);
           const score = new Score(req.body);
           const processedScore = await score.processScore();
-          const updatedMatchup = await MatchupModel.findByIdAndUpdate(
-            req.params.matchup_id,
-            {
-              matches: processedScore.matches,
-              "aTeam.paste": processedScore.aTeamPaste,
-              "bTeam.paste": processedScore.bTeamPaste,
-            },
-            { new: true, upsert: true }
-          );
+          const updatedMatchup = await updateMatchup(req.params.matchup_id, {
+            matches: processedScore.matches,
+            "aTeam.paste": processedScore.aTeamPaste,
+            "bTeam.paste": processedScore.bTeamPaste,
+          });
           if (updatedMatchup) {
-            res
+            return res
               .status(200)
               .json({ message: "Matchup Updated", draft: updatedMatchup });
           } else {
-            res
-              .status(404)
-              .json({ message: "Matchup not found", code: "DR-R8-01" });
+            return res.status(404).json({
+              message: "Matchup not found",
+              code: `${routeCode}-R8-01`,
+            });
           }
         } catch (error) {
-          console.error("Error updating matchup:", error);
-          res
-            .status(500)
-            .json({ message: (error as Error).message, code: "DR-R8-02" });
+          return sendError(res, 500, error as Error, `${routeCode}-R8-02`);
         }
       },
     },
     "/:team_id/:matchup_id/schedule": {
       get: async function (req: Request, res: MatchupResponse) {
-        if (!res.draftOld) {
+        if (!res.draft) {
           return;
         }
-        try {
-          // if (res.matchup) {
-          //   res.json({
-          //     gameTime: res.matchup.gameTime,
-          //     reminder: res.matchup.reminder,
-          //   });
-          // } else {
-          //   res
-          //     .status(500)
-          //     .json({ message: "Matchup not found", code: "DR-R6-01" });
-          // }
-        } catch (error) {
-          res
-            .status(500)
-            .json({ message: (error as Error).message, code: "DR-R9-02" });
+        if (res.matchup) {
+          return res.json({
+            gameTime: res.matchup.gameTime,
+            reminder: res.matchup.reminder,
+          });
+        } else {
+          logger.error(
+            `Matchup not found in response locals for team_id: ${req.params.team_id}, matchup_id: ${req.params.matchup_id}`
+          );
+          return sendError(
+            res,
+            500,
+            new Error("Matchup not found"),
+            `${routeCode}-R6-01`
+          );
         }
       },
       patch: async function (req: Request, res: DraftResponse) {
         try {
           const time = new GameTime(req.body);
           const processedTime = await time.processTime();
-          const updatedMatchup = await MatchupModel.findByIdAndUpdate(
-            req.params.matchup_id,
-            {
-              gameTime: processedTime.dateTime,
-              reminder: processedTime.emailTime,
-            },
-            { new: true, upsert: true }
-          );
+          const updatedMatchup = await updateMatchup(req.params.matchup_id, {
+            gameTime: processedTime.dateTime,
+            reminder: processedTime.emailTime,
+          });
           if (updatedMatchup) {
-            res
+            return res
               .status(200)
               .json({ message: "Matchup Updated", draft: updatedMatchup });
           } else {
-            res
-              .status(404)
-              .json({ message: "Matchup not found", code: "DR-R6-03" });
+            return res.status(404).json({
+              message: "Matchup not found",
+              code: `${routeCode}-R6-03`,
+            });
           }
         } catch (error) {
-          console.error("Error updating matchup:", error);
-          res
-            .status(500)
-            .json({ message: (error as Error).message, code: "DR-R6-04" });
+          return sendError(res, 500, error as Error, `${routeCode}-R6-04`);
         }
       },
     },
@@ -332,24 +309,16 @@ export const DraftRoutes: Route = {
   params: {
     team_id: async function (req: Request, res: DraftResponse, next, team_id) {
       try {
-        let user_id = req.auth!.payload.sub!;
-        const rawDraft: DraftDocument | null = mongoose.Types.ObjectId.isValid(
-          team_id
-        )
-          ? await DraftModel.findById(team_id)
-          : (
-              await DraftModel.find({
-                owner: user_id,
-                leagueId: team_id,
-              })
-            )[0];
+        const rawDraft = await getDraft(team_id, req.auth!.payload.sub!);
 
-        if (!rawDraft)
-          return res
-            .status(404)
-            .json({ message: "Team ID not found.", code: "DR-P1-02" });
+        if (!rawDraft) {
+          logger.error(`Team ID not found: ${team_id}`);
+          return res.status(404).json({
+            message: "Team ID not found.",
+            code: `${routeCode}-P1-02`,
+          });
+        }
         res.rawDraft = rawDraft;
-        res.draftOld = res.rawDraft.toObject<DraftData>();
         res.ruleset = getRuleset(rawDraft.ruleset);
         res.draft = Draft.fromData(rawDraft, res.ruleset);
       } catch (error) {
@@ -364,20 +333,37 @@ export const DraftRoutes: Route = {
       matchup_id
     ) => {
       try {
-        if (!matchup_id)
+        if (!matchup_id) {
+          logger.error(`Matchup ID not provided.`);
           return res
             .status(400) // Bad Request
-            .json({ message: "Matchup ID not provided.", code: "DR-P1-01" });
-        const rawMatchup: MatchupDocument | null = await MatchupModel.findById(
+            .json({
+              message: "Matchup ID not provided.",
+              code: `${routeCode}-P1-01`,
+            });
+        }
+        const rawMatchup: MatchupDocument | null = await getMatchupById(
           matchup_id
         );
         if (!rawMatchup) {
+          logger.error(`Matchup not found for matchup_id: ${matchup_id}`);
           return res
             .status(404) // Not Found
-            .json({ message: "Matchup not found.", code: "DR-P1-02" });
+            .json({
+              message: "Matchup not found.",
+              code: `${routeCode}-P1-02`,
+            });
+        }
+        if (!res.draft) {
+          return sendError(
+            res,
+            500,
+            new Error("Draft not found in response locals."),
+            `${routeCode}-P1-05`
+          );
         }
         const matchup = rawMatchup.toObject<MatchupData>();
-        res.matchup = await Matchup.fromData(matchup, res.draft!);
+        res.matchup = await Matchup.fromData(matchup, res.draft);
       } catch (error) {
         return sendError(res, 500, error as Error, `DR-P1-04`);
       }

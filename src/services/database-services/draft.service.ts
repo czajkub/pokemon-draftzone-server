@@ -1,11 +1,101 @@
 import { ID, toID } from "@pkmn/data";
+import { LRUCache } from "lru-cache";
 import { Types } from "mongoose";
 import { Ruleset } from "../../data/rulesets";
-import { MatchupModel } from "../../models/matchup.model";
+import {
+  DraftData,
+  DraftDocument,
+  DraftModel,
+} from "../../models/draft/draft.model";
 import { getName } from "../data-services/pokedex.service";
+import { getMatchupsByDraftId } from "./matchup.service";
 
-export async function getScore(teamId: Types.ObjectId) {
-  let matchups = await getMatchups(teamId);
+const $drafts = new LRUCache<string, DraftDocument>({
+  max: 100,
+  ttl: 1000 * 60 * 5,
+});
+
+export async function createDraft(draft: DraftData) {
+  const draftDoc = new DraftModel(draft);
+  await draftDoc.save();
+  const key = `${draftDoc.owner}:${draftDoc.leagueId}`;
+  $drafts.set(key, draftDoc);
+  $drafts.set(draftDoc._id.toString(), draftDoc);
+  return draftDoc;
+}
+
+export async function getDraftsByOwner(
+  ownerId: string
+): Promise<DraftDocument[]> {
+  return DraftModel.find({
+    owner: ownerId,
+  }).sort({
+    createdAt: -1,
+  });
+}
+
+export async function getDraft(
+  id: Types.ObjectId,
+  ownerId?: string
+): Promise<DraftDocument | null> {
+  const key: string = ownerId ? `${ownerId}:${id}` : id.toString();
+  if ($drafts.has(key)) {
+    return $drafts.get(key)!;
+  }
+
+  let draft: DraftDocument | null = null;
+  if (ownerId) {
+    draft = await DraftModel.findOne({ owner: ownerId, leagueId: id });
+  } else if (Types.ObjectId.isValid(id)) {
+    draft = await DraftModel.findById(id);
+  }
+
+  if (draft) {
+    $drafts.set(key, draft);
+    if (ownerId) {
+      $drafts.set(draft._id.toString(), draft);
+    } else {
+      if (draft.owner && draft.leagueId) {
+        $drafts.set(`${draft.owner}:${draft.leagueId}`, draft);
+      }
+    }
+  }
+
+  return draft;
+}
+
+export async function updateDraft(
+  ownerId: string,
+  leagueId: string,
+  draft: DraftData
+) {
+  const updatedDraft = await DraftModel.findOneAndUpdate(
+    { owner: ownerId, leagueId: leagueId },
+    draft,
+    { new: true, upsert: true }
+  );
+  if (updatedDraft) {
+    const key = `${ownerId}:${leagueId}`;
+    $drafts.delete(key);
+    $drafts.delete(updatedDraft._id.toString());
+    $drafts.set(key, updatedDraft);
+    $drafts.set(updatedDraft._id.toString(), updatedDraft);
+  }
+  return updatedDraft;
+}
+
+export async function deleteDraft(draft: DraftDocument) {
+  const result = await draft.deleteOne();
+  $drafts.delete(draft._id.toString());
+  if (draft.owner && draft.leagueId) {
+    const key = `${draft.owner}:${draft.leagueId}`;
+    $drafts.delete(key);
+  }
+  return result;
+}
+
+export async function getScore(draftId: Types.ObjectId) {
+  let matchups = await getMatchupsByDraftId(draftId);
   let score = { wins: 0, loses: 0, diff: "+0" };
   let numDiff = 0;
   let gameDiff = matchups.some((matchup) => matchup.matches.length > 1);
@@ -47,7 +137,7 @@ export async function getScore(teamId: Types.ObjectId) {
 }
 
 export async function getStats(ruleset: Ruleset, draftId: Types.ObjectId) {
-  let matchups = await getMatchups(draftId);
+  let matchups = await getMatchupsByDraftId(draftId);
   let stats: {
     [key: string]: {
       pokemon: { id: ID; name: string };
@@ -92,11 +182,5 @@ export async function getStats(ruleset: Ruleset, draftId: Types.ObjectId) {
         ? (stats[id].kills + stats[id].indirect) / stats[id].brought
         : 0;
   }
-  return Object.values(stats);
-}
-
-export async function getMatchups(draftId: Types.ObjectId) {
-  return await MatchupModel.find({ "aTeam._id": draftId })
-    .sort({ createdAt: -1 })
-    .lean();
+  return { pokemon: Object.values(stats) };
 }

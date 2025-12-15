@@ -1,5 +1,4 @@
 import { ID, Specie, toID, TypeName } from "@pkmn/data";
-import { LRUCache } from "lru-cache";
 import {
   AbilityName,
   As,
@@ -20,16 +19,18 @@ import {
   StatsTable,
   Tier,
 } from "@pkmn/dex-types";
+import { LRUCache } from "lru-cache";
+import { PZError } from "..";
+import { abilityModifiers } from "../data/pokedex/abilities";
 import { Ruleset } from "../data/rulesets";
+import { PokemonData } from "../models/pokemon.schema";
+import { getEffectivePower } from "../services/data-services/move.service";
+import { typeWeak } from "../services/data-services/type.services";
 import {
   CoverageMove,
   FullCoverageMove,
 } from "../services/matchup-services/coverage.service";
-import { PokemonData } from "../models/pokemon.schema";
-import { getEffectivePower } from "../services/data-services/move.service";
-import { typeWeak } from "../services/data-services/type.services";
 import { getBst } from "./specieUtil";
-import { abilityModifiers } from "../data/pokedex/abilities";
 export type PokemonOptions = {
   shiny?: boolean;
   nickname?: string;
@@ -89,6 +90,7 @@ export class DraftSpecie implements Specie, Pokemon {
   cosmeticFormes?: SpeciesName[];
   otherFormes?: SpeciesName[];
   formeOrder?: SpeciesName[];
+  isCosmeticForme!: boolean;
   genderRatio!: { M: number; F: number };
   weighthg!: number;
   tags!: SpeciesTag[];
@@ -146,23 +148,19 @@ export class DraftSpecie implements Specie, Pokemon {
   toString: () => SpeciesName;
   toJSON: () => { [key: string]: any };
   constructor(
-    pokemonData: (PokemonData | PokemonFormData) | (Specie & PokemonOptions),
+    pokemonData:
+      | ID
+      | (PokemonData | PokemonFormData)
+      | (Specie & PokemonOptions),
     ruleset: Ruleset
   ) {
-    let specie =
+    if (typeof pokemonData === "string") pokemonData = { id: pokemonData };
+    const specie =
       pokemonData instanceof Specie
         ? pokemonData
         : ruleset.species.get(pokemonData.id);
-    //Might get rid of eventually
     if (!specie)
-      specie = new DraftSpecie(
-        new Specie(
-          ruleset.dex,
-          ruleset.exists,
-          ruleset.dex.species.get(pokemonData.id)
-        ),
-        ruleset
-      );
+      throw new PZError(400, `Pokémon ID not found: ${pokemonData.id}`);
     Object.assign(this, specie);
     this.ruleset = ruleset;
     const TYPES = Array.from(this.ruleset.types).map((type) => type.name);
@@ -303,16 +301,33 @@ export class DraftSpecie implements Specie, Pokemon {
 
       items,
       learnset: (await this.learnset())
-        .map((move) => ({
-          id: move.id,
-          name: move.name,
-          type: move.type,
-          category: move.category,
-          effectivePower: getEffectivePower(move),
-          basePower: move.basePower,
-          accuracy: move.accuracy,
-        }))
+        .map((move) => {
+          const tags: string[] = [];
+          if (move.flags.bite) tags.push("Bite");
+          if (move.flags.bullet) tags.push("Bullet");
+          if (move.flags.contact) tags.push("Contact");
+          if (move.flags.slicing) tags.push("Slicing");
+          if (move.flags.sound) tags.push("Sound");
+          if (move.flags.wind) tags.push("Wind");
+          if (move.isZ) tags.push("Z");
+          if (move.isMax) tags.push("Max");
+          if (move.flags.pulse) tags.push("Pulse");
+          if (move.flags.punch) tags.push("Punch");
+          if (move.recoil) tags.push("Recoil");
+          if (move.flags.heal) tags.push("Healing");
+          return {
+            id: move.id,
+            name: move.name,
+            type: move.type,
+            category: move.category,
+            effectivePower: getEffectivePower(move),
+            basePower: move.basePower,
+            accuracy: move.accuracy,
+            tags,
+          };
+        })
         .sort((x, y) => y.effectivePower - x.effectivePower),
+      teraType: this.forceTeraType,
       data: {
         ...this.toClient(),
         types: this.types,
@@ -348,7 +363,7 @@ export class DraftSpecie implements Specie, Pokemon {
   getResists() {
     let tc = this.typechart();
     return Object.entries(tc)
-      .filter((value: [string, number]) => value[1] < 1)
+      .filter((value: [string, number]) => value[1] > 0 && value[1] < 1)
       .map((value: [string, number]) => value[0]);
   }
 
@@ -389,6 +404,16 @@ export class DraftSpecie implements Specie, Pokemon {
               } else if (this.requiredItem === "Hearthflame Mask") {
                 type = "Fire";
               }
+            } else if (
+              (move.id === "multiattack" &&
+                this.getAbilities().includes("RKS System")) ||
+              (move.id === "judgement" &&
+                this.getAbilities().includes("Multitype")) ||
+              move.id === "revelationdance"
+            ) {
+              type = this.types[0];
+            } else if (move.id === "ragingbull" && this.types[1]) {
+              type = this.types[1];
             }
             if (
               !(type in coverage[move.category]) ||
@@ -673,6 +698,21 @@ export class DraftSpecie implements Specie, Pokemon {
     if (this.id === "smeargle") return true;
     let moveID = toID(moveString);
     return (await this.learnset()).some((move) => move.id === moveID);
+  }
+
+  static getTeam(
+    team: (ID | (PokemonData | PokemonFormData) | (Specie & PokemonOptions))[],
+    ruleset: Ruleset
+  ) {
+    const specieTeam = team.reduce((acc: DraftSpecie[], pokemon) => {
+      try {
+        acc.push(new DraftSpecie(pokemon, ruleset));
+      } catch (e) {
+        // ignore pokemon that throws error
+      }
+      return acc;
+    }, []);
+    return specieTeam;
   }
 }
 

@@ -1,9 +1,10 @@
 import { Types } from "mongoose";
 import { Format, getFormat } from "../data/formats";
 import { Ruleset, getRuleset } from "../data/rulesets";
-import { DraftData } from "../models/draft.model";
+import { DraftData } from "../models/draft/draft.model";
+import { MatchupDocument } from "../models/draft/matchup.model";
+import { getMatchupsByDraftId } from "../services/database-services/matchup.service";
 import { DraftSpecie, PokemonFormData } from "./pokemon";
-import { MatchupDocument, MatchupModel } from "../models/matchup.model";
 
 export class Draft {
   constructor(
@@ -74,7 +75,7 @@ export class Draft {
       teamName: this.teamName,
       format: this.format.name,
       ruleset: this.ruleset.name,
-      score: await this.getScore(), //move away from computing each time
+      score: await this.getScore(),
       doc: this.doc,
       team: this.team.map((pokemon) => pokemon.toClient()),
     };
@@ -87,7 +88,6 @@ export class Draft {
   ): Draft {
     if (!ruleset) ruleset = getRuleset(data.ruleset);
     if (!format) format = getFormat(data.format);
-    const types = Array.from(ruleset.types).map((type) => type.name);
     return new Draft(
       ruleset,
       format,
@@ -96,30 +96,15 @@ export class Draft {
       data.leagueId,
       data.score,
       data.owner,
-      data.team.map((pokemon) => {
-        if (pokemon.capt) {
-          pokemon.capt.tera = pokemon.capt?.tera
-            ? pokemon.capt.tera.length
-              ? pokemon.capt.tera
-              : types
-            : undefined;
-          pokemon.capt.z = pokemon.capt?.z
-            ? pokemon.capt.z.length
-              ? pokemon.capt.z
-              : types.filter((type) => type !== "Stellar")
-            : undefined;
-        }
-        return new DraftSpecie(pokemon, ruleset);
-      }),
+      DraftSpecie.getTeam(data.team, ruleset),
       data.doc,
       data._id
     );
   }
 
-  //Add caching
   async getMatchups(): Promise<MatchupDocument[]> {
     if (!this._id) return Promise.resolve([]);
-    return MatchupModel.find({ "aTeam._id": this._id }).sort({ createdAt: -1 });
+    return getMatchupsByDraftId(this._id);
   }
 
   async getScore() {

@@ -1,5 +1,8 @@
 import {
+  APIEmbedField,
+  ChannelType,
   Client,
+  ColorResolvable,
   EmbedBuilder,
   GatewayIntentBits,
   Interaction,
@@ -49,7 +52,7 @@ export async function startDiscordBot(
     return undefined;
   }
 
-  client.once("ready", () => {
+  client.once("clientReady", () => {
     if (client.user) {
       logger.info(`Discord bot ready! Logged in as ${client.user.tag}`);
     } else {
@@ -126,19 +129,19 @@ export async function startDiscordBot(
     }
   });
 
-  client.on("messageCreate", async (message: Message) => {
-    if (message.author.bot || message.mentions.everyone || !client.user) return;
+  // client.on("messageCreate", async (message: Message) => {
+  //   if (message.author.bot || message.mentions.everyone || !client.user) return;
 
-    if (
-      message.content.toLowerCase().includes("deoxys") ||
-      message.mentions.has(client.user.id)
-    ) {
-      logger.info(
-        `Message Mention | Author: ${message.author.tag} (${message.author.id}) | Content: ${message.content}`
-      );
-      gptRespond(message, logger);
-    }
-  });
+  //   if (
+  //     message.content.toLowerCase().includes("deoxys") ||
+  //     message.mentions.has(client.user.id)
+  //   ) {
+  //     logger.info(
+  //       `Message Mention | Author: ${message.author.tag} (${message.author.id}) | Content: ${message.content}`
+  //     );
+  //     gptRespond(message, logger);
+  //   }
+  // });
 
   try {
     await client.login(config.DISCORD_TOKEN);
@@ -279,5 +282,67 @@ async function gptRespond(message: Message, logger: winston.Logger) {
     } catch (replyError) {
       logger.error("Failed to send error reply to user:", replyError);
     }
+  }
+}
+
+export async function sendDiscordMessage(
+  channelId: string,
+  options?:
+    | {
+        content?: string;
+        embed?: {
+          title?: string;
+          description?: string;
+          url?: string;
+          color?: ColorResolvable;
+          fields?: APIEmbedField[];
+          image?: string;
+        };
+      }
+    | string
+) {
+  try {
+    const channel = await client.channels.fetch(channelId);
+    if (typeof options === "string") options = { content: options };
+    if (
+      !(
+        channel &&
+        (channel.type === ChannelType.GuildText ||
+          channel.type === ChannelType.DM)
+      )
+    ) {
+      console.warn(`Channel ${channelId} not found or is not a text channel.`);
+      return;
+    }
+
+    const embedsToSend = [];
+
+    if (options?.embed) {
+      const pokemonEmbed = new EmbedBuilder()
+        .setColor(options.embed.color || "#FFDE00")
+        .setImage(options.embed.image ?? null)
+        .setTimestamp();
+
+      if (options.embed.title) {
+        pokemonEmbed.setTitle(options.embed.title);
+      }
+      if (options.embed.description) {
+        pokemonEmbed.setDescription(options.embed.description);
+      }
+      if (options.embed.url) {
+        pokemonEmbed.setURL(options.embed.url);
+      }
+      if (options.embed.fields && options.embed.fields.length > 0) {
+        pokemonEmbed.addFields(options.embed.fields);
+      }
+      embedsToSend.push(pokemonEmbed);
+    }
+
+    if (options?.content || embedsToSend.length > 0) {
+      await channel.send({ content: options?.content, embeds: embedsToSend });
+      console.log(`Successfully sent message to channel ${channelId}`);
+    }
+  } catch (error) {
+    console.error("Failed to send Discord message with embed:", error);
   }
 }

@@ -5,18 +5,18 @@ import mongoSanitize from "express-mongo-sanitize";
 import fs from "fs";
 import helmet from "helmet";
 import createError from "http-errors";
-import mongoose from "mongoose";
 import morgan from "morgan";
 import path from "path";
 import winston from "winston";
 import "winston-daily-rotate-file";
 import { config } from "./config";
+import { loggingContext } from "./middleware/loggingContext";
 import { Route } from "./routes";
 import { ArchiveRoutes } from "./routes/archive.route";
 import { BattleZoneRoutes } from "./routes/battlezone.route";
 import { DataRoutes } from "./routes/data.route";
 import { DraftRoutes } from "./routes/draft.route";
-import { LeagueAdRoutes } from "./routes/league-ad.route";
+import { LeagueRoutes } from "./routes/league.route";
 import { MatchupRoutes } from "./routes/matchup.route";
 import { NewsRoutes } from "./routes/news.route";
 import { PlannerRoutes } from "./routes/planner.route";
@@ -46,16 +46,28 @@ export const logger = winston.createLogger({
   ),
   transports: [
     new winston.transports.DailyRotateFile({
-      level: "error",
-      filename: path.join(logDir, "error-%DATE%.log"),
+      filename: path.join(logDir, "app-%DATE%.log"),
       datePattern: "YYYY-MM-DD",
       zippedArchive: true,
       maxSize: "20m",
       maxFiles: "14d",
     }),
+  ],
+});
 
+const routerLogger = winston.createLogger({
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.printf(({ timestamp, message }) => {
+      if (typeof message === "object" && message !== null) {
+        return JSON.stringify({ ...message, timestamp });
+      }
+      return JSON.stringify({ message, timestamp });
+    })
+  ),
+  transports: [
     new winston.transports.DailyRotateFile({
-      filename: path.join(logDir, "combined-%DATE%.log"),
+      filename: path.join(logDir, "router-%DATE%.log"),
       datePattern: "YYYY-MM-DD",
       zippedArchive: true,
       maxSize: "20m",
@@ -88,12 +100,17 @@ app.set("view engine", "pug");
 app.set("trust proxy", true);
 
 app.use(helmet());
+app.use(express.urlencoded({ extended: false }));
+app.use(cookieParser());
+app.use(express.json());
+
+app.use(loggingContext);
 
 app.use(
   mongoSanitize({
     replaceWith: "_",
     onSanitize: ({ req, key }: { req: Request; key: string }) => {
-      logger.warn(`Request field sanitized`, {
+      req.logger.warn(`Request field sanitized`, {
         key,
         path: req.originalUrl,
         ip: req.ip,
@@ -101,10 +118,6 @@ app.use(
     },
   })
 );
-
-app.use(express.urlencoded({ extended: false }));
-app.use(cookieParser());
-app.use(express.json());
 
 const allowedOrigins = [
   "https://dqptrox2bn9qw.cloudfront.net",
@@ -127,7 +140,46 @@ app.use(
   })
 );
 
-app.use(morgan(config.NODE_ENV === "development" ? "dev" : "common"));
+// Morgan setup for router logging
+morgan.token("id", (req: Request) => req.id);
+morgan.token(
+  "user-id",
+  (req: Request) => req.auth?.payload?.sub || "unauthenticated"
+);
+morgan.token("body-length", (req: Request) => req.bodyLength.toString());
+morgan.token("body-hash", (req: Request) => req.bodyHash);
+
+const morganJSONFormat = (
+  tokens: morgan.TokenIndexer<Request, Response>,
+  req: Request,
+  res: Response
+) => {
+  return JSON.stringify({
+    "request-id": tokens.id(req, res),
+    "user-id": tokens["user-id"](req, res),
+    "remote-address": tokens["remote-addr"](req, res),
+    "remote-user": tokens["remote-user"](req, res),
+    "http-version": tokens["http-version"](req, res),
+    method: tokens.method(req, res),
+    url: tokens.url(req, res),
+    status: tokens.status(req, res),
+    "response-time": tokens["response-time"](req, res, "ms"),
+    "content-length": tokens.res(req, res, "content-length"),
+    "request-body-length": tokens["body-length"](req, res),
+    "request-body-hash": tokens["body-hash"](req, res),
+    referrer: tokens.referrer(req, res),
+    "user-agent": tokens["user-agent"](req, res),
+  });
+};
+
+const routerStream = {
+  write: (message: string) => {
+    routerLogger.info(JSON.parse(message));
+  },
+};
+
+app.use(morgan(morganJSONFormat, { stream: routerStream }));
+
 export const ROUTES: { [path: string]: Route } = {
   "/draft": DraftRoutes,
   "/archive": ArchiveRoutes,
@@ -135,7 +187,7 @@ export const ROUTES: { [path: string]: Route } = {
   "/data": DataRoutes,
   "/replay": ReplayRoutes,
   "/planner": PlannerRoutes,
-  "/leagues": LeagueAdRoutes,
+  "/leagues": LeagueRoutes,
   "/teambuilder": TeambuilderRoutes,
   "/supporters": SupporterRoutes,
   "/battlezone": BattleZoneRoutes,
@@ -171,10 +223,13 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 });
 
 app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+  if (!req.logger) {
+    req.logger = logger;
+  }
   const status = err.status || 500;
   const message = err.message || "Internal Server Error";
 
-  logger.error(`Error processing request`, {
+  req.logger.error(`Error processing request`, {
     status,
     message,
     method: req.method,
