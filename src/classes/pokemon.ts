@@ -30,7 +30,7 @@ import {
   CoverageMove,
   FullCoverageMove,
 } from "../services/matchup-services/coverage.service";
-import { getBst } from "./specieUtil";
+import { getBST, getCST } from "./specieUtil";
 export type PokemonOptions = {
   shiny?: boolean;
   nickname?: string;
@@ -137,6 +137,7 @@ export class DraftSpecie implements Specie, Pokemon {
   capt?: Partial<{ tera: TypeName[]; z: TypeName[]; dmax: boolean }>;
   ruleset: Ruleset;
   bst: number;
+  cst: number;
   inheritsFrom!: ID;
   formes?: SpeciesName[];
   evoRegion?: "Alola" | "Galar";
@@ -199,7 +200,8 @@ export class DraftSpecie implements Specie, Pokemon {
     } else {
       this.abilities = specie.abilities;
     }
-    this.bst = getBst(specie);
+    this.bst = getBST(specie);
+    this.cst = getCST(specie);
   }
 
   get formeNum() {
@@ -289,50 +291,26 @@ export class DraftSpecie implements Specie, Pokemon {
           pngId: `https://play.pokemonshowdown.com/sprites/itemicons/${item.name
             .replace(" ", "-")
             .toLowerCase()}.png`,
-          desc: item.desc,
+          desc: item.shortDesc,
           tags,
         };
       });
 
+    const genders: ("M" | "F")[] = [];
+    if (this.genderRatio.M > 0) genders.push("M");
+    if (this.genderRatio.F > 0) genders.push("F");
+
     return {
+      id: this.id,
+      name: this.name,
       abilities: this.getAbilities().filter(
         (ability) => ability !== ""
       ) as AbilityName[],
-
       items,
-      learnset: (await this.learnset())
-        .map((move) => {
-          const tags: string[] = [];
-          if (move.flags.bite) tags.push("Bite");
-          if (move.flags.bullet) tags.push("Bullet");
-          if (move.flags.contact) tags.push("Contact");
-          if (move.flags.slicing) tags.push("Slicing");
-          if (move.flags.sound) tags.push("Sound");
-          if (move.flags.wind) tags.push("Wind");
-          if (move.isZ) tags.push("Z");
-          if (move.isMax) tags.push("Max");
-          if (move.flags.pulse) tags.push("Pulse");
-          if (move.flags.punch) tags.push("Punch");
-          if (move.recoil) tags.push("Recoil");
-          if (move.flags.heal) tags.push("Healing");
-          return {
-            id: move.id,
-            name: move.name,
-            type: move.type,
-            category: move.category,
-            effectivePower: getEffectivePower(move),
-            basePower: move.basePower,
-            accuracy: move.accuracy,
-            tags,
-          };
-        })
-        .sort((x, y) => y.effectivePower - x.effectivePower),
       teraType: this.forceTeraType,
-      data: {
-        ...this.toClient(),
-        types: this.types,
-        baseStats: this.baseStats,
-      },
+      types: this.types,
+      baseStats: this.baseStats,
+      genders,
     };
   }
 
@@ -722,6 +700,7 @@ export type PokemonFormData = {
   shiny?: boolean;
   nickname?: string;
   draftFormes?: Pokemon[];
+  genders?: ("M" | "F")[];
   modifiers?: {
     abilities?: string[];
     moves?: string[];
